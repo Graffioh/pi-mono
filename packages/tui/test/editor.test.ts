@@ -2212,6 +2212,67 @@ describe("Editor component", () => {
 			assert.strictEqual(aborts, 1);
 		});
 
+		it("dispatches mid-text slash command via onSlashCommand and removes only the /token", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "model", description: "Select model" },
+					{ name: "settings", description: "Open settings" },
+				],
+				"/tmp",
+			);
+			editor.setAutocompleteProvider(provider);
+
+			let dispatched: string | null = null;
+			editor.onSlashCommand = (command) => {
+				dispatched = command;
+			};
+
+			// Type the surrounding prompt and the mid-text slash token.
+			for (const ch of "ok let's do /mo") {
+				editor.handleInput(ch);
+			}
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			// Confirm the highlighted suggestion (Enter).
+			editor.handleInput("\r");
+
+			assert.strictEqual(dispatched, "/model");
+			assert.strictEqual(editor.getText(), "ok let's do ");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+		it("does not dispatch slash-prefixed file completions as commands", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const provider: AutocompleteProvider = {
+				async getSuggestions() {
+					return {
+						items: [{ value: "/usr/", label: "usr/", kind: "file" }],
+						prefix: "/u",
+						kind: "file",
+					};
+				},
+				applyCompletion,
+			};
+			editor.setAutocompleteProvider(provider);
+
+			let dispatched: string | null = null;
+			editor.onSlashCommand = (command) => {
+				dispatched = command;
+			};
+
+			editor.setText("/u");
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\r");
+
+			assert.strictEqual(dispatched, null);
+			assert.strictEqual(editor.getText(), "/usr/");
+		});
+
 		it("hides autocomplete when backspacing slash command to empty", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

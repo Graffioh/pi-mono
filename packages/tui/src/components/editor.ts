@@ -1,4 +1,9 @@
-import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.js";
+import {
+	type AutocompleteItemKind,
+	type AutocompleteProvider,
+	type AutocompleteSuggestions,
+	extractSlashCommandPrefix,
+} from "../autocomplete.js";
 import { getKeybindings } from "../keybindings.js";
 import { decodePrintableKey, matchesKey } from "../keys.js";
 import { KillRing } from "../kill-ring.js";
@@ -242,6 +247,7 @@ export class Editor implements Component, Focusable {
 	private autocompleteList?: SelectList;
 	private autocompleteState: "regular" | "force" | null = null;
 	private autocompletePrefix: string = "";
+	private autocompleteKind: AutocompleteItemKind | null = null;
 	private autocompleteMaxVisible: number = 5;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
@@ -282,6 +288,7 @@ export class Editor implements Component, Focusable {
 	private undoStack = new UndoStack<EditorState>();
 
 	public onSubmit?: (text: string) => void;
+	public onSlashCommand?: (command: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
 
@@ -628,6 +635,18 @@ export class Editor implements Component, Focusable {
 			if (kb.matches(data, "tui.select.confirm")) {
 				const selected = this.autocompleteList.getSelectedItem();
 				if (selected && this.autocompleteProvider) {
+					const autocompleteKind = this.autocompleteKind;
+
+					if (autocompleteKind === "command" && this.onSlashCommand) {
+						this.pushUndoSnapshot();
+						this.lastAction = null;
+						this.removePrefixAtCursor(this.autocompletePrefix);
+						this.cancelAutocomplete();
+						if (this.onChange) this.onChange(this.getText());
+						this.onSlashCommand(`/${selected.value}`);
+						return;
+					}
+
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -641,9 +660,8 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					if (this.autocompletePrefix.startsWith("/")) {
+					if (autocompleteKind === "command") {
 						this.cancelAutocomplete();
-						// Fall through to submit
 					} else {
 						this.cancelAutocomplete();
 						if (this.onChange) this.onChange(this.getText());
@@ -1051,7 +1069,7 @@ export class Editor implements Component, Focusable {
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
 			// Auto-trigger for "/" at the start of a line (slash commands)
-			if (char === "/" && this.isAtStartOfMessage()) {
+			if (char === "/" && this.isAtSlashCommandStart()) {
 				this.tryTriggerAutocomplete();
 			}
 			// Auto-trigger for symbol-based completion like @ or # at token boundaries
@@ -1266,6 +1284,20 @@ export class Editor implements Component, Focusable {
 		this.state.cursorCol = col;
 		this.preferredVisualCol = null;
 		this.snappedFromCursorCol = null;
+	}
+
+	/**
+	 * Remove a contiguous prefix that ends at the current cursor position from the
+	 * current line and place the cursor where the prefix started. Used to strip a
+	 * `/foo` slash-command token after the user dispatches the command via Enter.
+	 */
+	private removePrefixAtCursor(prefix: string): void {
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const startCol = Math.max(0, this.state.cursorCol - prefix.length);
+		const before = currentLine.slice(0, startCol);
+		const after = currentLine.slice(this.state.cursorCol);
+		this.state.lines[this.state.cursorLine] = before + after;
+		this.setCursorCol(before.length);
 	}
 
 	/**
@@ -2035,21 +2067,16 @@ export class Editor implements Component, Focusable {
 		this.setCursorCol(newCol);
 	}
 
-	// Slash menu only allowed on the first line of the editor
-	private isSlashMenuAllowed(): boolean {
-		return this.state.cursorLine === 0;
-	}
-
-	// Helper method to check if cursor is at start of message (for slash command detection)
-	private isAtStartOfMessage(): boolean {
-		if (!this.isSlashMenuAllowed()) return false;
+	// True when the just-typed `/` starts a command token.
+	private isAtSlashCommandStart(): boolean {
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
-		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-		return beforeCursor.trim() === "" || beforeCursor.trim() === "/";
+		return extractSlashCommandPrefix(currentLine.slice(0, this.state.cursorCol)) === "/";
 	}
 
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
-		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
+		const isCommandToken = extractSlashCommandPrefix(textBeforeCursor) !== null;
+		const isLineCommandArgument = textBeforeCursor.startsWith("/") && textBeforeCursor.includes(" ");
+		return isCommandToken || isLineCommandArgument;
 	}
 
 	// Autocomplete methods
@@ -2083,10 +2110,10 @@ export class Editor implements Component, Focusable {
 	}
 
 	private createAutocompleteList(
-		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
+		kind: AutocompleteItemKind | null,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+		const layout = kind === "command" ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
 		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
 	}
 
@@ -2249,8 +2276,10 @@ export class Editor implements Component, Focusable {
 	}
 
 	private applyAutocompleteSuggestions(suggestions: AutocompleteSuggestions, state: "regular" | "force"): void {
+		const kind = suggestions.kind ?? suggestions.items[0]?.kind ?? null;
 		this.autocompletePrefix = suggestions.prefix;
-		this.autocompleteList = this.createAutocompleteList(suggestions.prefix, suggestions.items);
+		this.autocompleteKind = kind;
+		this.autocompleteList = this.createAutocompleteList(suggestions.items, kind);
 
 		const bestMatchIndex = this.getBestAutocompleteMatchIndex(suggestions.items, suggestions.prefix);
 		if (bestMatchIndex >= 0) {
@@ -2274,6 +2303,7 @@ export class Editor implements Component, Focusable {
 		this.autocompleteState = null;
 		this.autocompleteList = undefined;
 		this.autocompletePrefix = "";
+		this.autocompleteKind = null;
 	}
 
 	private cancelAutocomplete(): void {

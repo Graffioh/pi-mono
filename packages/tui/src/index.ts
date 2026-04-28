@@ -3,6 +3,7 @@
 // Autocomplete support
 export {
 	type AutocompleteItem,
+	type AutocompleteItemKind,
 	type AutocompleteProvider,
 	type AutocompleteSuggestions,
 	CombinedAutocompleteProvider,

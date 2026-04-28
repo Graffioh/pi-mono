@@ -114,6 +114,99 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 	});
 
+	describe("mid-text slash commands", () => {
+		const buildProvider = () =>
+			new CombinedAutocompleteProvider(
+				[
+					{ name: "model", description: "Select model" },
+					{ name: "settings", description: "Open settings" },
+				],
+				"/tmp",
+			);
+
+		it("returns command suggestions when typing /mo after whitespace", async () => {
+			const provider = buildProvider();
+			const lines = ["ok let's do /mo"];
+
+			const result = await getSuggestions(provider, lines, 0, lines[0]!.length);
+
+			assert.notEqual(result, null, "Should suggest commands mid-text");
+			if (result) {
+				assert.strictEqual(result.prefix, "/mo", "Prefix should be just the slash token");
+				assert.strictEqual(result.kind, "command");
+				assert.ok(
+					result.items.some((item) => item.value === "model"),
+					"Should include 'model' suggestion",
+				);
+			}
+		});
+
+		it("does not suggest commands when slash is glued to previous text (path)", async () => {
+			const provider = buildProvider();
+			const lines = ["foo/mo"];
+
+			const result = await getSuggestions(provider, lines, 0, lines[0]!.length);
+
+			// Without a whitespace boundary, this is not a slash command; it should not return command items.
+			if (result) {
+				assert.ok(
+					!result.items.some((item) => item.value === "model"),
+					"Should not suggest 'model' for non-bounded slash",
+				);
+			}
+		});
+
+		it("does not fall through to file suggestions for a slash command token", async () => {
+			const provider = new CombinedAutocompleteProvider([], process.cwd());
+			const lines = ["hello /"];
+
+			const result = await getSuggestions(provider, lines, 0, lines[0]!.length);
+
+			assert.strictEqual(result, null);
+		});
+
+		it("closes autocomplete after typing space after a slash command token", async () => {
+			const provider = buildProvider();
+			const lines = ["hello / "];
+
+			const result = await getSuggestions(provider, lines, 0, lines[0]!.length);
+
+			assert.strictEqual(result, null);
+		});
+
+		it("applyCompletion replaces only the /prefix token mid-text", () => {
+			const provider = buildProvider();
+			const lines = ["ok let's do /mo"];
+			const result = provider.applyCompletion(
+				lines,
+				0,
+				lines[0]!.length,
+				{ value: "model", label: "model", kind: "command" },
+				"/mo",
+			);
+
+			assert.deepStrictEqual(result.lines, ["ok let's do /model "]);
+			assert.strictEqual(result.cursorLine, 0);
+			assert.strictEqual(result.cursorCol, "ok let's do /model ".length);
+		});
+
+		it("does not treat slash-prefixed file completions as commands", () => {
+			const provider = buildProvider();
+			const lines = ["/u"];
+			const result = provider.applyCompletion(
+				lines,
+				0,
+				lines[0]!.length,
+				{ value: "/usr/", label: "usr/", kind: "file" },
+				"/u",
+			);
+
+			assert.deepStrictEqual(result.lines, ["/usr/"]);
+			assert.strictEqual(result.cursorLine, 0);
+			assert.strictEqual(result.cursorCol, "/usr/".length);
+		});
+	});
+
 	describe("fd @ file suggestions", { skip: !isFdInstalled }, () => {
 		let rootDir = "";
 		let baseDir = "";

@@ -243,6 +243,8 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 }
 
+type InteractiveSlashCommand = SlashCommand & { clearEditor?: boolean };
+
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private ui: TUI;
@@ -253,6 +255,7 @@ export class InteractiveMode {
 	private editor: EditorComponent;
 	private autocompleteProvider: AutocompleteProvider | undefined;
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
+	private autocompleteSlashCommandClearEditor = new Map<string, boolean>();
 	private fdPath: string | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
@@ -455,9 +458,10 @@ export class InteractiveMode {
 
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
 		// Define commands for autocomplete
-		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
+		const slashCommands: InteractiveSlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
 			name: command.name,
 			description: command.description,
+			...(command.clearEditor && { clearEditor: true }),
 		}));
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
@@ -492,7 +496,7 @@ export class InteractiveMode {
 		}
 
 		// Convert prompt templates to SlashCommand format for autocomplete
-		const templateCommands: SlashCommand[] = this.session.promptTemplates.map((cmd) => ({
+		const templateCommands: InteractiveSlashCommand[] = this.session.promptTemplates.map((cmd) => ({
 			name: cmd.name,
 			description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
 			...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
@@ -500,7 +504,7 @@ export class InteractiveMode {
 
 		// Convert extension commands to SlashCommand format
 		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
-		const extensionCommands: SlashCommand[] = this.session.extensionRunner
+		const extensionCommands: InteractiveSlashCommand[] = this.session.extensionRunner
 			.getRegisteredCommands()
 			.filter((cmd) => !builtinCommandNames.has(cmd.name))
 			.map((cmd) => ({
@@ -511,7 +515,7 @@ export class InteractiveMode {
 
 		// Build skill commands from session.skills (if enabled)
 		this.skillCommands.clear();
-		const skillCommandList: SlashCommand[] = [];
+		const skillCommandList: InteractiveSlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
 			for (const skill of this.session.resourceLoader.getSkills().skills) {
 				const commandName = `skill:${skill.name}`;
@@ -523,11 +527,12 @@ export class InteractiveMode {
 			}
 		}
 
-		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
-			this.sessionManager.getCwd(),
-			this.fdPath,
+		const allSlashCommands = [...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList];
+		this.autocompleteSlashCommandClearEditor = new Map(
+			allSlashCommands.map((command) => [command.name, command.clearEditor === true]),
 		);
+
+		return new CombinedAutocompleteProvider(allSlashCommands, this.sessionManager.getCwd(), this.fdPath);
 	}
 
 	private setupAutocompleteProvider(): void {
@@ -2196,6 +2201,7 @@ export class InteractiveMode {
 
 			// Wire up callbacks from the default editor
 			newEditor.onSubmit = this.defaultEditor.onSubmit;
+			newEditor.onSlashCommand = this.defaultEditor.onSlashCommand;
 			newEditor.onChange = this.defaultEditor.onChange;
 
 			// Copy text from previous editor
@@ -2453,132 +2459,148 @@ export class InteractiveMode {
 		}
 	}
 
+	private async runDispatchedSlashCommand(clearEditor: boolean, handler: () => void | Promise<void>): Promise<true> {
+		if (clearEditor) {
+			this.editor.setText("");
+		}
+		await handler();
+		return true;
+	}
+
+	private async dispatchSlashCommand(text: string, options: { clearEditor?: boolean } = {}): Promise<boolean> {
+		const run = (handler: () => void | Promise<void>) =>
+			this.runDispatchedSlashCommand(options.clearEditor === true, handler);
+
+		if (text === "/settings") {
+			return run(() => this.showSettingsSelector());
+		}
+		if (text === "/scoped-models") {
+			return run(() => this.showModelsSelector());
+		}
+		if (text === "/model" || text.startsWith("/model ")) {
+			const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
+			return run(() => this.handleModelCommand(searchTerm));
+		}
+		if (text === "/export" || text.startsWith("/export ")) {
+			return run(() => this.handleExportCommand(text));
+		}
+		if (text === "/import" || text.startsWith("/import ")) {
+			return run(() => this.handleImportCommand(text));
+		}
+		if (text === "/share") {
+			return run(() => this.handleShareCommand());
+		}
+		if (text === "/copy") {
+			return run(() => this.handleCopyCommand());
+		}
+		if (text === "/name" || text.startsWith("/name ")) {
+			return run(() => this.handleNameCommand(text));
+		}
+		if (text === "/session") {
+			return run(() => this.handleSessionCommand());
+		}
+		if (text === "/changelog") {
+			return run(() => this.handleChangelogCommand());
+		}
+		if (text === "/hotkeys") {
+			return run(() => this.handleHotkeysCommand());
+		}
+		if (text === "/fork") {
+			return run(() => this.showUserMessageSelector());
+		}
+		if (text === "/clone") {
+			return run(() => this.handleCloneCommand());
+		}
+		if (text === "/tree") {
+			return run(() => this.showTreeSelector());
+		}
+		if (text === "/login") {
+			return run(() => this.showOAuthSelector("login"));
+		}
+		if (text === "/logout") {
+			return run(() => this.showOAuthSelector("logout"));
+		}
+		if (text === "/new") {
+			return run(() => this.handleClearCommand());
+		}
+		if (text === "/compact" || text.startsWith("/compact ")) {
+			const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
+			return run(() => this.handleCompactCommand(customInstructions));
+		}
+		if (text === "/reload") {
+			return run(() => this.handleReloadCommand());
+		}
+		if (text === "/debug") {
+			return run(() => this.handleDebugCommand());
+		}
+		if (text === "/arminsayshi") {
+			return run(() => this.handleArminSaysHi());
+		}
+		if (text === "/dementedelves") {
+			return run(() => this.handleDementedDelves());
+		}
+		if (text === "/resume") {
+			return run(() => this.showSessionSelector());
+		}
+		if (text === "/quit") {
+			return run(() => this.shutdown());
+		}
+		return false;
+	}
+
+	private shouldClearEditorForAutocompleteSlashCommand(command: string): boolean {
+		const commandName = command.slice(1).split(/\s+/, 1)[0];
+		return this.autocompleteSlashCommandClearEditor.get(commandName) === true;
+	}
+
+	private async dispatchAutocompleteSlashCommand(command: string): Promise<void> {
+		const clearEditor = this.shouldClearEditorForAutocompleteSlashCommand(command);
+		if (
+			await this.dispatchSlashCommand(command, {
+				clearEditor,
+			})
+		)
+			return;
+
+		if (!command.startsWith("/")) return;
+		if (clearEditor) {
+			this.editor.setText("");
+		}
+
+		try {
+			if (this.session.isCompacting) {
+				if (this.isExtensionCommand(command)) {
+					await this.session.prompt(command);
+				} else {
+					this.queueCompactionMessage(command, "steer");
+				}
+				return;
+			}
+
+			if (this.session.isStreaming) {
+				await this.session.prompt(command, { streamingBehavior: "steer" });
+				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+				return;
+			}
+
+			await this.session.prompt(command);
+		} catch (error: unknown) {
+			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+			this.showError(errorMessage);
+		}
+	}
+
 	private setupEditorSubmitHandler(): void {
+		this.defaultEditor.onSlashCommand = (command: string) => {
+			void this.dispatchAutocompleteSlashCommand(command);
+		};
+
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
 			if (!text) return;
 
-			// Handle commands
-			if (text === "/settings") {
-				this.showSettingsSelector();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/scoped-models") {
-				this.editor.setText("");
-				await this.showModelsSelector();
-				return;
-			}
-			if (text === "/model" || text.startsWith("/model ")) {
-				const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
-				this.editor.setText("");
-				await this.handleModelCommand(searchTerm);
-				return;
-			}
-			if (text === "/export" || text.startsWith("/export ")) {
-				await this.handleExportCommand(text);
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/import" || text.startsWith("/import ")) {
-				await this.handleImportCommand(text);
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/share") {
-				await this.handleShareCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/copy") {
-				await this.handleCopyCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/name" || text.startsWith("/name ")) {
-				this.handleNameCommand(text);
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/session") {
-				this.handleSessionCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/changelog") {
-				this.handleChangelogCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/hotkeys") {
-				this.handleHotkeysCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/fork") {
-				this.showUserMessageSelector();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/clone") {
-				this.editor.setText("");
-				await this.handleCloneCommand();
-				return;
-			}
-			if (text === "/tree") {
-				this.showTreeSelector();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/login") {
-				this.showOAuthSelector("login");
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/logout") {
-				this.showOAuthSelector("logout");
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/new") {
-				this.editor.setText("");
-				await this.handleClearCommand();
-				return;
-			}
-			if (text === "/compact" || text.startsWith("/compact ")) {
-				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
-				this.editor.setText("");
-				await this.handleCompactCommand(customInstructions);
-				return;
-			}
-			if (text === "/reload") {
-				this.editor.setText("");
-				await this.handleReloadCommand();
-				return;
-			}
-			if (text === "/debug") {
-				this.handleDebugCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/arminsayshi") {
-				this.handleArminSaysHi();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/dementedelves") {
-				this.handleDementedDelves();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/resume") {
-				this.showSessionSelector();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/quit") {
-				this.editor.setText("");
-				await this.shutdown();
+			if (await this.dispatchSlashCommand(text, { clearEditor: true })) {
 				return;
 			}
 

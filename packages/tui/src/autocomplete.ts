@@ -5,6 +5,7 @@ import { basename, dirname, join } from "path";
 import { fuzzyFilter } from "./fuzzy.js";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
+const SLASH_COMMAND_PREFIX_REGEX = /(?:^|\s)(\/\S*)$/;
 
 function toDisplayPath(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -69,6 +70,11 @@ function findUnclosedQuoteStart(text: string): number | null {
 
 function isTokenStart(text: string, index: number): boolean {
 	return index === 0 || PATH_DELIMITERS.has(text[index - 1] ?? "");
+}
+
+// Extract a `/foo` command token when it starts the line or follows whitespace.
+export function extractSlashCommandPrefix(text: string): string | null {
+	return SLASH_COMMAND_PREFIX_REGEX.exec(text)?.[1] ?? null;
 }
 
 function extractQuotedPrefix(text: string): string | null {
@@ -216,10 +222,13 @@ async function walkDirectoryWithFd(
 	});
 }
 
+export type AutocompleteItemKind = "command" | "argument" | "file";
+
 export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
+	kind?: AutocompleteItemKind;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -236,6 +245,7 @@ export interface SlashCommand {
 export interface AutocompleteSuggestions {
 	items: AutocompleteItem[];
 	prefix: string; // What we're matching against (e.g., "/" or "src/")
+	kind?: AutocompleteItemKind;
 }
 
 export interface AutocompleteProvider {
@@ -299,14 +309,14 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return {
 				items: suggestions,
 				prefix: atPrefix,
+				kind: "file",
 			};
 		}
 
-		if (!options.force && textBeforeCursor.startsWith("/")) {
-			const spaceIndex = textBeforeCursor.indexOf(" ");
-
-			if (spaceIndex === -1) {
-				const prefix = textBeforeCursor.slice(1);
+		if (!options.force) {
+			const slashPrefix = extractSlashCommandPrefix(textBeforeCursor);
+			if (slashPrefix !== null) {
+				const prefix = slashPrefix.slice(1);
 				const commandItems = this.commands.map((cmd) => {
 					const name = "name" in cmd ? cmd.name : cmd.value;
 					const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
@@ -322,37 +332,43 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const filtered = fuzzyFilter(commandItems, prefix, (item) => item.name).map((item) => ({
 					value: item.name,
 					label: item.label,
+					kind: "command" as const,
 					...(item.description && { description: item.description }),
 				}));
 
-				if (filtered.length === 0) return null;
-
-				return {
-					items: filtered,
-					prefix: textBeforeCursor,
-				};
-			}
-
-			const commandName = textBeforeCursor.slice(1, spaceIndex);
-			const argumentText = textBeforeCursor.slice(spaceIndex + 1);
-
-			const command = this.commands.find((cmd) => {
-				const name = "name" in cmd ? cmd.name : cmd.value;
-				return name === commandName;
-			});
-			if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
+				if (filtered.length > 0) {
+					return {
+						items: filtered,
+						prefix: slashPrefix,
+						kind: "command",
+					};
+				}
 				return null;
 			}
 
-			const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-			if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
-				return null;
-			}
+			// Argument completion is only offered when the slash command starts the line.
+			if (textBeforeCursor.startsWith("/")) {
+				const spaceIndex = textBeforeCursor.indexOf(" ");
+				if (spaceIndex !== -1) {
+					const commandName = textBeforeCursor.slice(1, spaceIndex);
+					const argumentText = textBeforeCursor.slice(spaceIndex + 1);
 
-			return {
-				items: argumentSuggestions,
-				prefix: argumentText,
-			};
+					const command = this.commands.find((cmd) => {
+						const name = "name" in cmd ? cmd.name : cmd.value;
+						return name === commandName;
+					});
+					if (command && "getArgumentCompletions" in command && command.getArgumentCompletions) {
+						const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+						if (Array.isArray(argumentSuggestions) && argumentSuggestions.length > 0) {
+							return {
+								items: argumentSuggestions.map((item) => ({ ...item, kind: "argument" })),
+								prefix: argumentText,
+								kind: "argument",
+							};
+						}
+					}
+				}
+			}
 		}
 
 		const pathMatch = this.extractPathPrefix(textBeforeCursor, options.force ?? false);
@@ -366,6 +382,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return {
 			items: suggestions,
 			prefix: pathMatch,
+			kind: "file",
 		};
 	}
 
@@ -385,9 +402,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const adjustedAfterCursor =
 			isQuotedPrefix && hasTrailingQuoteInItem && hasLeadingQuoteAfterCursor ? afterCursor.slice(1) : afterCursor;
 
-		// Check if we're completing a slash command (prefix starts with "/" but NOT a file path)
-		// Slash commands are at the start of the line and don't contain path separators after the first /
-		const isSlashCommand = prefix.startsWith("/") && beforePrefix.trim() === "" && !prefix.slice(1).includes("/");
+		// Backward-compatible fallback for callers that pass command items without a kind.
+		const isSlashCommand =
+			item.kind === "command" ||
+			(item.kind === undefined &&
+				prefix.startsWith("/") &&
+				!prefix.slice(1).includes("/") &&
+				(beforePrefix === "" || /\s$/.test(beforePrefix)));
 		if (isSlashCommand) {
 			// This is a command name completion
 			const newLine = `${beforePrefix}/${item.value} ${adjustedAfterCursor}`;
@@ -418,25 +439,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				lines: newLines,
 				cursorLine,
 				cursorCol: beforePrefix.length + cursorOffset + suffix.length,
-			};
-		}
-
-		// Check if we're in a slash command context (beforePrefix contains "/command ")
-		const textBeforeCursor = currentLine.slice(0, cursorCol);
-		if (textBeforeCursor.includes("/") && textBeforeCursor.includes(" ")) {
-			// This is likely a command argument completion
-			const newLine = beforePrefix + item.value + adjustedAfterCursor;
-			const newLines = [...lines];
-			newLines[cursorLine] = newLine;
-
-			const isDirectory = item.label.endsWith("/");
-			const hasTrailingQuote = item.value.endsWith('"');
-			const cursorOffset = isDirectory && hasTrailingQuote ? item.value.length - 1 : item.value.length;
-
-			return {
-				lines: newLines,
-				cursorLine,
-				cursorCol: beforePrefix.length + cursorOffset,
 			};
 		}
 
@@ -491,12 +493,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		// For natural triggers, return if it looks like a path, ends with /, starts with ~/, .
 		// Only return empty string if the text looks like it's starting a path context
 		if (pathPrefix.includes("/") || pathPrefix.startsWith(".") || pathPrefix.startsWith("~/")) {
-			return pathPrefix;
-		}
-
-		// Return empty string only after a space (not for completely empty text)
-		// Empty text should not trigger file suggestions - that's for forced Tab completion
-		if (pathPrefix === "" && text.endsWith(" ")) {
 			return pathPrefix;
 		}
 
@@ -670,6 +666,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				suggestions.push({
 					value,
 					label: name + (isDirectory ? "/" : ""),
+					kind: "file",
 				});
 			}
 
@@ -759,6 +756,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					value,
 					label: entryName + (isDirectory ? "/" : ""),
 					description: displayPath,
+					kind: "file",
 				});
 			}
 

@@ -29,6 +29,14 @@ export interface EditorComponent extends Component {
 	/** Called when user submits (e.g., Enter key) */
 	onSubmit?: (text: string) => void;
 
+	/**
+	 * Called when the user picks a slash command from the autocomplete list and
+	 * confirms it (e.g., Enter). The editor has already removed the `/foo` token
+	 * from the buffer while leaving surrounding text intact. Receives the full
+	 * command including the leading `/`.
+	 */
+	onSlashCommand?: (command: string) => void;
+
 	/** Called when text changes */
 	onChange?: (text: string) => void;
 
