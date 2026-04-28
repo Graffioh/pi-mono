@@ -2467,7 +2467,7 @@ export class InteractiveMode {
 		return true;
 	}
 
-	private async dispatchSlashCommand(text: string, options: { clearEditor?: boolean } = {}): Promise<boolean> {
+	private async dispatchBuiltInSlashCommand(text: string, options: { clearEditor?: boolean } = {}): Promise<boolean> {
 		const run = (handler: () => void | Promise<void>) =>
 			this.runDispatchedSlashCommand(options.clearEditor === true, handler);
 
@@ -2556,7 +2556,7 @@ export class InteractiveMode {
 	private async dispatchAutocompleteSlashCommand(command: string): Promise<void> {
 		const clearEditor = this.shouldClearEditorForAutocompleteSlashCommand(command);
 		if (
-			await this.dispatchSlashCommand(command, {
+			await this.dispatchBuiltInSlashCommand(command, {
 				clearEditor,
 			})
 		)
@@ -2604,7 +2604,7 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
-			if (await this.dispatchSlashCommand(text, { clearEditor: true })) {
+			if (await this.dispatchBuiltInSlashCommand(text, { clearEditor: true })) {
 				return;
 			}
 
