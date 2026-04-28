@@ -2567,6 +2567,10 @@ export class InteractiveMode {
 			this.editor.setText("");
 		}
 
+		// Built-in commands were handled above. Other slash commands may come
+		// from extensions, prompt templates, skills, or user input, so route them
+		// through the session prompt path with the same streaming/compaction rules
+		// as regular submitted input.
 		try {
 			if (this.session.isCompacting) {
 				if (this.isExtensionCommand(command)) {
