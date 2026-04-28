@@ -402,14 +402,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const adjustedAfterCursor =
 			isQuotedPrefix && hasTrailingQuoteInItem && hasLeadingQuoteAfterCursor ? afterCursor.slice(1) : afterCursor;
 
-		// Backward-compatible fallback for callers that pass command items without a kind.
-		const isSlashCommand =
-			item.kind === "command" ||
-			(item.kind === undefined &&
-				prefix.startsWith("/") &&
-				!prefix.slice(1).includes("/") &&
-				(beforePrefix === "" || /\s$/.test(beforePrefix)));
-		if (isSlashCommand) {
+		if (item.kind === "command") {
 			// This is a command name completion
 			const newLine = `${beforePrefix}/${item.value} ${adjustedAfterCursor}`;
 			const newLines = [...lines];
